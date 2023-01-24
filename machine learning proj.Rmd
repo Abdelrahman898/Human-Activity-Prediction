@@ -1,0 +1,209 @@
+---
+title: "Human Activity Prediction"
+author: "Abdelrahman"
+output: html_document
+---
+
+
+```{r glopal_options , include=FALSE,echo=FALSE}
+knitr::opts_chunk$set(
+      fig.width = 8,
+      fig.height = 6,
+      fig.path = "Figs/",
+      echo = TRUE,
+      warning = FALSE,
+      message = FALSE
+)
+options(knitr.table.format = "html") 
+```
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement -- a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har).
+
+### Data
+
+-   The training are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv).
+
+-   The test data are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+-   More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har).
+
+### Goal
+
+The goal of your project is to predict the manner in which they did the exercise. This is the *"classe"* variable in the training set. You may use any of the other variables to predict with.the report will describe how we built the model, how we used cross validation, what is the expected out of sample error is, and what is the choices i did.
+
+## Loading Packages
+
+```{r packages, include=FALSE}
+pacman::p_load(data.table, caret, parallel, doParallel, purrr, visdat, dplyr, printr, kableExtra, corrplot, e1071, randomForest, ggplot2)
+```
+
+## reading data
+
+```{r data, include=FALSE}
+
+library(readr)
+pml_testing <- read.table(header = TRUE, 
+                          sep=",",file = "pml-testing.csv",na.strings=c("","NA","#DIV/0"),stringsAsFactors=T)
+View(pml_testing)
+str(pml_testing)
+
+pml_training <- read.table(header = TRUE, 
+                           sep=",",file = "pml-training.csv",na.strings=c("","NA","#DIV/0"),stringsAsFactors=T)
+View(pml_training)
+str(pml_training)
+table(pml_training$classe)
+
+```
+
+## Data Preprocessing
+
+Looking at our data, we see there's a total of 160 variables that we have to build our model. there is some of these variables are not useful for building our prediction model, especially the first 7 columns.
+
+```{r subset}
+training <- pml_training[,-c(1:7)]
+testing <- pml_testing[,-c(1:7)]
+
+rbind(training = dim(training),
+      testing = dim(testing)) %>%
+      kbl() %>%
+      kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+-   we want to reduce the unnecessary variables,to do this is by using `nearZeroVar` function which finds variables with near zero variability.
+
+```{r remove_NAs_first_method}
+# using nearZeroVar function to get feature with zero variability
+nvs <- nearZeroVar(training,saveMetrics = T)
+# get row names
+final_feature <- nvs %>%  filter(nzv==FALSE) %>% rownames(nvs)
+# select our data
+training <- training[,(names(training) %in% final_feature)]
+testing <- testing[,(names(testing) %in% final_feature)]
+# there is NAs col still need to remove
+training <- training %>% select_if(~ !any(is.na(.)))
+testing <- testing %>% select_if(~ !any(is.na(.)))
+
+rbind(training = dim(training),
+      testing = dim(testing)) %>%
+      kbl() %>%
+      kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+-   anther way is to create a function that remone NAs, we set a threshold for the amount of NAs a variable has in our data. I'm going to set the threshold as 75% and use the discard function from the purrr package to discard the variables.
+
+```{r remove_NAs_second_method}
+
+# function to remove columns with NAs
+na_remove_col <- function(data, threshold) {
+    data %>%
+        discard(~ sum(is.na(.x)) / length(.x) * 100 > threshold)
+}
+
+new_train <- na_remove_col(training, 75)
+new_test <- na_remove_col(testing, 75)
+rbind(training = dim(new_train),
+      testing = dim(new_test)) %>%
+      kbl() %>%
+      kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+
+## Data Partition
+```{r split_data}
+intrain <- createDataPartition(training$classe,p=0.7,list = F)
+train <- training[intrain,]
+test <- training[-intrain,]
+```
+
+Now we have our train and test data which is 70% and 30% of our initial training data.
+
+## Prediction
+
+### Random forest Model
+
+we need is a classifier model To predict the `classe` variable in our data, which is a factor variable.  I'm going to use a random forest model because it's a flexible and easy to use ensemble learning algorithm that provides high accuracy predictions through cross-validation.
+
+### Setting Parallel Processing
+
+That said, building random forest models can be computationally expensive, so we'll be setting registering for parallel processing with the `parallel` and `doParallel` packages.
+
+```{r parallel, eval=FALSE}
+cluster <- makeCluster(detectCores() - 1) 
+registerDoParallel(cluster)
+```
+
+
+### Building the model
+
+As said before, random forest uses cross-validation to randomly split the fitted training set into train and test sets based on the given k-folds, in this case will be 7, in the `trainControl` function. This means our model will be trained 7 times based on the cross-validated data. We also set `allowParallel` as True to allow for parallel processing.
+
+Using Caret, model training can be done with the `train` function, and our method is "rf" which stands for random forest, and we preProcess with PCA.
+
+```{r rf_model, eval=FALSE}
+set.seed(20233)
+fitControl <- trainControl(method = "cv",number = 7,allowParallel = TRUE)
+
+rf.model <- train(classe ~ .,data = train,method = "rf",trControl = fitControl)
+
+# stop cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+# save model into an rds file
+saveRDS(rf.model,file="rfmodel.rds")
+```
+
+
+### Model Performance
+
+```{r model_output}
+model.rf <- readRDS(file = "rfmodel.rds")
+model.rf
+```
+
+From the results, we see that the optimal model has an **accuracy of 0.992**
+
+```{r final_model}
+model.rf$finalModel
+```
+
+The *OOB* is our out of sample rate, which is **0.66%**. This means our accuracy is considered high and acceptable for our prediction.
+
+Below you see the plot for the error of each `classe` prediction as the no of trees increase, and we see that as we reach around 160 trees, the OOB becomes flat, and we can use 160 as the `ntrees` for our `trcontrol` if we decide to further fine-tune our model.
+
+```{r oob_plot}
+plot(model.rf$finalModel,main='OOB plot')
+```
+
+### Variable Importance
+
+```{r varimp_plot, fig.height=6, fig.width=8}
+# use VarImp fun to tell us the most important features in predicting classe variable
+importance <- varImp(model.rf, scale = FALSE)
+# plot most 10 important feature
+plot(importance, top=10)
+```
+
+using `VarImp` function by R tells us that from our model, the most important feature in predicting the classe variable is *roll_belt* .
+
+
+## Final Prediction on Validation
+
+Finally we apply our model to the 20 test cases given in the testing validation data.
+
+```{r predict_final}
+final.pred.rf <- predict(model.rf, testing)
+summary(final.pred.rf)
+```
+
+```{r predict_final 1}
+final.pred.rf
+```
+
+
+
